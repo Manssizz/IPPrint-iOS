@@ -18,50 +18,81 @@ jobs:
     - name: Select Xcode
       run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
       
-    - name: Show Xcode & Simulator info
-      run: |
-        xcodebuild -version
-        xcrun simctl list runtimes
-        xcrun simctl list devices available | head -40
+    - name: Show Xcode version
+      run: xcodebuild -version
 
-    - name: Find best available simulator
+    - name: Install iOS Simulator Runtime
+      run: |
+        # Check what runtimes are available
+        echo "=== Currently installed runtimes ==="
+        xcrun simctl list runtimes || true
+        
+        # Install iOS 18.2 simulator runtime (matches Xcode 16.2)
+        echo "=== Installing iOS 18.2 runtime ==="
+        xcodebuild -downloadPlatform iOS
+        
+        echo "=== Runtimes after install ==="
+        xcrun simctl list runtimes
+
+    - name: Create and boot simulator
       id: simulator
       run: |
-        # Find an available iPhone 15 simulator, fallback to any iPhone
-        DEVICE=$(xcrun simctl list devices available -j | python3 -c "
+        # List available device types
+        echo "=== Available device types ==="
+        xcrun simctl list devicetypes | grep -i "iphone 15" || true
+        
+        # List available devices
+        echo "=== Available devices ==="
+        xcrun simctl list devices available | grep -i "iphone" || true
+        
+        # Try to find existing iPhone 15, or create one
+        DEVICE_UDID=$(xcrun simctl list devices available -j | python3 -c "
         import json, sys
         data = json.load(sys.stdin)
-        fallback = None
         for runtime, devices in data['devices'].items():
             if 'iOS' in runtime:
                 for d in devices:
-                    name = d['name']
-                    if d['isAvailable'] and 'iPhone' in name:
-                        if 'iPhone 15' in name and not fallback:
-                            fallback = name
-                        if name == 'iPhone 15':
-                            print(name)
-                            sys.exit(0)
-        if fallback:
-            print(fallback)
-        else:
-            print('iPhone 15')
-        ")
-        echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
-        echo "Using simulator: $DEVICE"
+                    if d['isAvailable'] and d['name'] == 'iPhone 15':
+                        print(d['udid'])
+                        sys.exit(0)
+        # Not found
+        sys.exit(1)
+        " 2>/dev/null) || true
+        
+        if [ -z "$DEVICE_UDID" ]; then
+          echo "No iPhone 15 found, creating one..."
+          # Get the latest iOS runtime identifier
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for r in reversed(data['runtimes']):
+              if r['isAvailable'] and 'iOS' in r['name']:
+                  print(r['identifier'])
+                  sys.exit(0)
+          sys.exit(1)
+          ")
+          echo "Using runtime: $RUNTIME"
+          DEVICE_UDID=$(xcrun simctl create "iPhone 15" "com.apple.CoreSimulator.SimDeviceType.iPhone-15" "$RUNTIME")
+          echo "Created simulator: $DEVICE_UDID"
+        else
+          echo "Found existing iPhone 15: $DEVICE_UDID"
+        fi
+        
+        echo "device_udid=$DEVICE_UDID" >> "$GITHUB_OUTPUT"
 
     - name: Build for iPhone Simulator
       run: |
         xcodebuild build \
           -project IPPrint.xcodeproj \
           -scheme IPPrint \
-          -destination 'platform=iOS Simulator,name=${{ steps.simulator.outputs.device }}' \
+          -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.device_udid }}' \
           -configuration Debug \
           CODE_SIGN_IDENTITY="" \
           CODE_SIGNING_REQUIRED=NO \
           CODE_SIGNING_ALLOWED=NO \
           ENABLE_PREVIEWS=NO \
-          -skipPackagePluginValidation
+          -skipPackagePluginValidation \
+          | tail -50
 
     - name: Build Archive (unsigned)
       run: |
@@ -76,26 +107,26 @@ jobs:
           CODE_SIGNING_ALLOWED=NO \
           ENABLE_PREVIEWS=NO \
           SKIP_INSTALL=NO \
-          -skipPackagePluginValidation
+          -skipPackagePluginValidation \
+          | tail -50
 
     - name: Package Build Artifact
       run: |
         mkdir -p ${{ runner.temp }}/export
-        if [ -d "${{ runner.temp }}/IPPrint.xcarchive/Products/Applications/IPPrint.app" ]; then
-          cd "${{ runner.temp }}/IPPrint.xcarchive/Products/Applications"
-          zip -r "${{ runner.temp }}/export/IPPrint-unsigned.zip" IPPrint.app
+        APP_PATH=$(find "${{ runner.temp }}/IPPrint.xcarchive" -name "IPPrint.app" -type d | head -1)
+        if [ -n "$APP_PATH" ]; then
+          cd "$(dirname "$APP_PATH")"
+          zip -r "${{ runner.temp }}/export/IPPrint-unsigned.zip" "$(basename "$APP_PATH")"
+          echo "Packaged: $APP_PATH"
         else
-          echo "=== Archive structure ==="
-          find "${{ runner.temp }}/IPPrint.xcarchive" -type d -maxdepth 4
-          echo "=== Looking for .app ==="
-          find "${{ runner.temp }}/IPPrint.xcarchive" -name "*.app" 2>/dev/null
+          echo "ERROR: No .app found in archive"
+          find "${{ runner.temp }}/IPPrint.xcarchive" -type d -maxdepth 5
+          exit 1
         fi
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
         name: IPPrint-Build
-        path: |
-          ${{ runner.temp }}/export/
-          ${{ runner.temp }}/IPPrint.xcarchive/
+        path: ${{ runner.temp }}/export/
         retention-days: 30
