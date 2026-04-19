@@ -80,49 +80,65 @@ jobs:
         
         echo "device_udid=$DEVICE_UDID" >> "$GITHUB_OUTPUT"
 
-    - name: Build for iPhone Simulator
+    - name: Build Release for Simulator
       run: |
         xcodebuild build \
           -project IPPrint.xcodeproj \
           -scheme IPPrint \
           -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.device_udid }}' \
-          -configuration Debug \
-          CODE_SIGN_IDENTITY="" \
+          -configuration Release \
+          -derivedDataPath ${{ runner.temp }}/DerivedData \
+          CODE_SIGN_IDENTITY="-" \
           CODE_SIGNING_REQUIRED=NO \
           CODE_SIGNING_ALLOWED=NO \
           ENABLE_PREVIEWS=NO \
-          -skipPackagePluginValidation \
-          | tail -50
+          -skipPackagePluginValidation
 
-    - name: Build Archive (unsigned)
+    - name: Build Release for Device (unsigned)
+      continue-on-error: true
+      id: device_build
       run: |
-        xcodebuild archive \
+        xcodebuild build \
           -project IPPrint.xcodeproj \
           -scheme IPPrint \
           -destination 'generic/platform=iOS' \
-          -archivePath ${{ runner.temp }}/IPPrint.xcarchive \
           -configuration Release \
+          -derivedDataPath ${{ runner.temp }}/DerivedDataDevice \
           CODE_SIGN_IDENTITY="" \
           CODE_SIGNING_REQUIRED=NO \
           CODE_SIGNING_ALLOWED=NO \
+          AD_HOC_CODE_SIGNING_ALLOWED=YES \
           ENABLE_PREVIEWS=NO \
-          SKIP_INSTALL=NO \
-          -skipPackagePluginValidation \
-          | tail -50
+          -skipPackagePluginValidation
 
-    - name: Package Build Artifact
+    - name: Package Build Artifacts
       run: |
         mkdir -p ${{ runner.temp }}/export
-        APP_PATH=$(find "${{ runner.temp }}/IPPrint.xcarchive" -name "IPPrint.app" -type d | head -1)
-        if [ -n "$APP_PATH" ]; then
-          cd "$(dirname "$APP_PATH")"
-          zip -r "${{ runner.temp }}/export/IPPrint-unsigned.zip" "$(basename "$APP_PATH")"
-          echo "Packaged: $APP_PATH"
+        
+        # 1) Try device build first (real arm64 .app)
+        DEVICE_APP=$(find "${{ runner.temp }}/DerivedDataDevice" -path "*/Release-iphoneos/IPPrint.app" -type d 2>/dev/null | head -1)
+        if [ -n "$DEVICE_APP" ]; then
+          echo "Found device .app: $DEVICE_APP"
+          cd "$(dirname "$DEVICE_APP")"
+          zip -r "${{ runner.temp }}/export/IPPrint-device-unsigned.zip" IPPrint.app
         else
-          echo "ERROR: No .app found in archive"
-          find "${{ runner.temp }}/IPPrint.xcarchive" -type d -maxdepth 5
+          echo "No device build .app (expected if signing failed)"
+        fi
+        
+        # 2) Simulator build (always works)
+        SIM_APP=$(find "${{ runner.temp }}/DerivedData" -path "*/Release-iphonesimulator/IPPrint.app" -type d 2>/dev/null | head -1)
+        if [ -n "$SIM_APP" ]; then
+          echo "Found simulator .app: $SIM_APP"
+          cd "$(dirname "$SIM_APP")"
+          zip -r "${{ runner.temp }}/export/IPPrint-simulator.zip" IPPrint.app
+        else
+          echo "ERROR: No simulator .app found either"
+          find "${{ runner.temp }}/DerivedData" -name "*.app" -type d 2>/dev/null
           exit 1
         fi
+        
+        echo "=== Build artifacts ==="
+        ls -la ${{ runner.temp }}/export/
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
